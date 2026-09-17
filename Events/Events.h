@@ -1,0 +1,239 @@
+#pragma once
+#include <iostream>
+#include <functional>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <queue>
+#include <unordered_map>
+
+
+using Event = std::function<void()>;
+
+enum EventType {
+	ET_Trigger,
+	ET_OneTime,
+	ET_Continuous,
+};
+
+struct Trigger {
+	virtual ~Trigger() = default;
+	virtual bool IsTriggered() = 0;
+};
+
+class BoolTrigger : public Trigger {
+	bool& value;
+
+public:
+	BoolTrigger(bool& value) : value(value) {}
+
+	bool IsTriggered() override {
+		return value;
+	}
+};
+
+template<typename T>
+class ValueTrigger : public Trigger {
+	T& value;
+	std::function<bool(T)> condition;
+
+public:
+	ValueTrigger(T& value, std::function<bool(T)> condition) : value(value), condition(std::move(condition)) {}
+
+	bool IsTriggered() override {
+		return condition(value);
+	}
+};
+
+struct EventData {
+	std::string name;
+	EventType type;
+	std::shared_ptr<Trigger> trigger;
+	Event callback;
+};
+
+template<typename T>
+inline std::shared_ptr<ValueTrigger<T>> When(T& trigger, std::function<bool(T)> condition) {
+	return std::make_shared<ValueTrigger<T>>(trigger, condition);
+}
+inline std::shared_ptr<BoolTrigger> When(bool& trigger) {
+	return std::make_shared<BoolTrigger>(trigger);
+}
+
+template<typename T>
+inline Event Set(T& value, T newValue) {
+	return [&value, newValue]() {value = newValue; };
+}
+
+template<typename...Args>
+inline Event Do(Args&&... args) {
+	return [args...]() {(args(), ...); };
+}
+
+template<typename...Args>
+inline Event Print(Args&&... args) {
+	return [args...]() {(std::cout << ... << args) << std::endl;};
+}
+
+namespace ET {
+	template<typename T>
+	std::function<bool(T)> GreaterThan(T triggerer) {
+		return [triggerer](T value) {return value > triggerer; };
+	}
+	template<typename T>
+	std::function<bool(T)> LessThan(T triggerer) {
+		return [triggerer](T value) {return value < triggerer; };
+	}
+	template<typename T>
+	std::function<bool(int)> EqualTo(T triggerer) {
+		return [triggerer](T value) {return value == triggerer; };
+	}
+	template<typename T>
+	std::function<bool(T)> NotEqualTo(T triggerer) {
+		return [triggerer](T value) {return value != triggerer; };
+	}
+	template<typename T>
+	std::function<bool(T)> GreaterOrEqualThan(T triggerer) {
+		return [triggerer](T value) {return value >= triggerer; };
+	}
+	template<typename T>
+	std::function<bool(T)> LessOrEqualThan(T triggerer) {
+		return [triggerer](T value) {return value <= triggerer; };
+	}
+}
+
+
+template<typename T>
+class Snapshot {
+	std::atomic<int> version = 0;
+	std::atomic<std::shared_ptr<T>> events;
+public:
+	Snapshot() {
+		events.store(std::make_shared<T>());
+	}
+
+	template< typename... Args>
+	void Insert(Args&&... args) {
+		auto old = events.load();
+		auto newData = std::make_shared<T>(*old);
+		newData->insert_or_assign(std::forward<Args>(args)...);
+		events.store(newData);
+		version.fetch_add(1);
+	}
+
+	template< typename... Args>
+	void Push(Args&&... args) {
+		auto old = events.load();
+		auto newData = std::make_shared<T>(*old);
+
+		newData->push(std::forward<Args>(args)...);
+
+		events.store(newData);
+		version.fetch_add(1);
+	}
+
+	template<typename... Args>
+	void Erase(Args&&... args) {
+		auto old = events.load();
+		auto newData = std::make_shared<T>(*old);
+
+		newData->erase(std::forward<Args>(args)...);
+
+		events.store(newData);
+		version.fetch_add(1);
+	}
+
+	int Version() const { return version.load(); }
+
+	std::shared_ptr<T> Get() {
+		return events.load();
+	}
+
+
+};
+
+class EventHandler {
+	Snapshot<std::unordered_map<std::string, EventData>> eventsSnapshot;
+	std::thread eventsThread;
+	std::unordered_map<std::string, EventData> events;
+	int dataVersion = 0;
+	int jobVersion = 0;
+	std::queue<Event> eventsJob;
+	std::mutex jobsMutex;
+public:
+	std::atomic<bool> isEventsRunning = true;
+
+	EventHandler() {
+		eventsThread = std::thread([&]() {
+			while (isEventsRunning.load()) {
+				int currentVersion = eventsSnapshot.Version();
+				if (dataVersion != currentVersion) {
+					events = *(eventsSnapshot.Get());
+					dataVersion = currentVersion;
+				}
+
+				for (auto& event : events) {
+					switch (event.second.type)
+					{
+					case ET_Trigger:
+						if ((*event.second.trigger).IsTriggered()) {
+							{
+								std::lock_guard lock(jobsMutex);
+								eventsJob.push(event.second.callback);
+							}
+						}
+						break;
+					case ET_OneTime:
+						if ((*event.second.trigger).IsTriggered()) {
+							{
+								std::lock_guard lock(jobsMutex);
+								eventsJob.push(event.second.callback);
+							}
+							eventsSnapshot.Erase(event.first);
+						}
+						break;
+
+					case ET_Continuous:
+
+						break;
+					default:
+						break;
+					}
+				}
+
+				std::this_thread::sleep_for(std::chrono::milliseconds(16));
+			}
+			});
+	}
+
+	~EventHandler() {
+		isEventsRunning = false;
+		eventsThread.join();
+	}
+	void Once(std::string eventName, std::shared_ptr<Trigger> trigger, Event event) {
+		eventsSnapshot.Insert(eventName, EventData{ eventName, ET_OneTime, trigger, event });
+	}
+	void On(std::string eventName, std::shared_ptr<Trigger> trigger, Event event) {
+		eventsSnapshot.Insert(eventName, EventData{ eventName, ET_Trigger, trigger, event });
+	}
+	void While(std::string eventName, std::shared_ptr<Trigger> trigger, Event event) {
+		eventsSnapshot.Insert(eventName, EventData{ eventName, ET_Continuous, trigger, event });
+	}
+
+
+	void HandleJobs() {
+		std::queue<Event> localJobs;
+		{
+			std::lock_guard lock(jobsMutex);
+			std::swap(localJobs, eventsJob);
+		}
+
+		while (!localJobs.empty()) {
+			auto& event = localJobs.front();
+
+			event();
+
+			localJobs.pop();
+		}
+	}
+};
