@@ -88,7 +88,7 @@ struct EventData {
 	EventType type;
 	std::shared_ptr<Trigger> trigger;
 	Event callback;
-	bool wasTriggered = false;
+	Event elseCallback = nullptr;
 };
 
 template<typename T>
@@ -125,6 +125,11 @@ inline Event Do(Args&&... args) {
 template<typename...Args>
 inline Event Print(Args&&... args) {
 	return [&args...]() {(std::cout << ... << args) << std::endl; };
+}
+
+template<typename T>
+Event Increment(T& value) {
+	return [&value]() {value++;};
 }
 
 namespace ET {
@@ -173,12 +178,13 @@ public:
 		version.fetch_add(1);
 	}
 
-	template< typename... Args>
-	void Push(Args&&... args) {
+	void Publish(const T& data)
+	{
 		auto old = events.load();
 		auto newData = std::make_shared<T>(*old);
 
-		newData->push(std::forward<Args>(args)...);
+		for (const auto& item : data)
+			newData->insert_or_assign(item.first, item.second);
 
 		events.store(newData);
 		version.fetch_add(1);
@@ -213,6 +219,8 @@ class EventHandler {
 	std::queue<Event> eventsJob;
 	std::mutex jobsMutex;
 	std::unordered_map<std::string, EventState> eventStates;
+	bool batchBegined = false;
+	std::unordered_map<std::string, EventData> batch;
 public:
 	std::atomic<bool> isEventsRunning = true;
 
@@ -232,14 +240,20 @@ public:
 					{
 						bool triggered = event.second.trigger->IsTriggered();
 
-						if (triggered && !event.second.wasTriggered) {
+						if (triggered && !eventStates[event.first].wasTriggered) {
 							{
 								std::lock_guard lock(jobsMutex);
 								eventsJob.push(event.second.callback);
 							}
 						}
+						else if (!triggered && eventStates[event.first].wasTriggered) {
+							if(event.second.elseCallback){
+								std::lock_guard lock(jobsMutex);
+								eventsJob.push(event.second.elseCallback);
+							}
+						}
 
-						event.second.wasTriggered = triggered;
+						eventStates[event.first].wasTriggered = triggered;
 					}
 					break;
 					case ET_OneTime:
@@ -282,19 +296,38 @@ public:
 		isEventsRunning = false;
 		eventsThread.join();
 	}
-	void Once(std::string eventName, std::shared_ptr<Trigger> trigger, Event event) {
-		eventsSnapshot.Insert(eventName, EventData{ eventName, ET_OneTime, trigger, event });
+	void Once(std::string eventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent = nullptr) {
+		if (!batchBegined)
+			eventsSnapshot.Insert(eventName, EventData{ eventName, ET_OneTime, trigger, event, elseEvent });
+		else
+			batch.insert_or_assign(eventName, EventData{ eventName, ET_OneTime, trigger, event, elseEvent });
 	}
-	void On(std::string eventName, std::shared_ptr<Trigger> trigger, Event event) {
-		eventsSnapshot.Insert(eventName, EventData{ eventName, ET_Trigger, trigger, event });
+	void On(std::string eventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent = nullptr) {
+		if (!batchBegined) 
+			eventsSnapshot.Insert(eventName, EventData{ eventName, ET_Trigger, trigger, event, elseEvent });
+		else 
+			batch.insert_or_assign(eventName, EventData{ eventName, ET_Trigger, trigger, event, elseEvent });
 	}
-	void OnChange(std::string eventName, std::shared_ptr<Trigger> trigger, Event event) {
-		eventsSnapshot.Insert(eventName, EventData{ eventName, ET_OnChange, trigger, event });
+	void OnChange(std::string eventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent = nullptr) {
+		if (!batchBegined)
+			eventsSnapshot.Insert(eventName, EventData{ eventName, ET_OnChange, trigger, event, elseEvent });
+		else
+			batch.insert_or_assign(eventName, EventData{ eventName, ET_OnChange, trigger, event, elseEvent });
 	}
-	void While(std::string eventName, std::shared_ptr<Trigger> trigger, Event event) {
-		eventsSnapshot.Insert(eventName, EventData{ eventName, ET_Continuous, trigger, event });
+	void While(std::string eventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent = nullptr) {
+		if (!batchBegined)
+			eventsSnapshot.Insert(eventName, EventData{ eventName, ET_Continuous, trigger, event, elseEvent });
+		else
+			batch.insert_or_assign(eventName, EventData{ eventName, ET_Continuous, trigger, event, elseEvent });
 	}
-
+	void BeginBatch() {
+		batch.clear();
+		batchBegined = true;
+	}
+	void EndBatch() {
+		eventsSnapshot.Publish(batch);
+		batchBegined = false;
+	}
 
 	void HandleJobs() {
 		std::queue<Event> localJobs;
