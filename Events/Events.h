@@ -14,6 +14,7 @@ enum EventType {
 	ET_Trigger,
 	ET_OneTime,
 	ET_Continuous,
+	ET_OnChange,
 };
 
 struct Trigger {
@@ -21,11 +22,12 @@ struct Trigger {
 	virtual bool IsTriggered() = 0;
 };
 
+template<typename T>
 class BoolTrigger : public Trigger {
-	bool& value;
+	T& value;
 
 public:
-	BoolTrigger(bool& value) : value(value) {}
+	BoolTrigger(T& value) : value(value) {}
 
 	bool IsTriggered() override {
 		return value;
@@ -33,16 +35,52 @@ public:
 };
 
 template<typename T>
+T& ReadValue(T& value) {
+	return value;
+}
+
+template<typename T>
+T ReadValue(std::atomic<T>& value) {
+	return value.load();
+}
+
+template<typename T>
+using TriggerValue = decltype(ReadValue(std::declval<T&>()));
+
+
+template<typename T>
 class ValueTrigger : public Trigger {
 	T& value;
-	std::function<bool(T)> condition;
-
+	std::function<bool(TriggerValue<T>)> condition;
 public:
-	ValueTrigger(T& value, std::function<bool(T)> condition) : value(value), condition(std::move(condition)) {}
+	ValueTrigger(T& value, std::function<bool(TriggerValue<T>)> condition) : value(value), condition(std::move(condition)) {}
 
 	bool IsTriggered() override {
-		return condition(value);
+		return condition(ReadValue(value));
 	}
+};
+
+template<typename T>
+class ChangeTrigger : public Trigger {
+	T& value;
+	T previousValue;
+
+public:
+	ChangeTrigger(T& value): value(value), previousValue(value) {}
+
+	bool IsTriggered() override {
+		if (value != previousValue) {
+			previousValue = value;
+			return true;
+		}
+
+		return false;
+	}
+};
+
+struct EventState {
+	bool wasTriggered = false;
+	bool initialized = false;
 };
 
 struct EventData {
@@ -50,19 +88,33 @@ struct EventData {
 	EventType type;
 	std::shared_ptr<Trigger> trigger;
 	Event callback;
+	bool wasTriggered = false;
 };
 
 template<typename T>
-inline std::shared_ptr<ValueTrigger<T>> When(T& trigger, std::function<bool(T)> condition) {
+inline std::shared_ptr<ValueTrigger<T>> When(T& trigger, std::function<bool(TriggerValue<T>)> condition) {
 	return std::make_shared<ValueTrigger<T>>(trigger, condition);
 }
-inline std::shared_ptr<BoolTrigger> When(bool& trigger) {
-	return std::make_shared<BoolTrigger>(trigger);
+inline std::shared_ptr<BoolTrigger<bool>> When(bool& trigger) {
+	return std::make_shared<BoolTrigger<bool>>(trigger);
+}
+inline std::shared_ptr<BoolTrigger<std::atomic<bool>>> When(std::atomic<bool>& trigger) {
+	return std::make_shared<BoolTrigger<std::atomic<bool>>>(trigger);
+}
+
+template<typename T>
+inline std::shared_ptr<ChangeTrigger<T>> Change(T& value) {
+	return std::make_shared<ChangeTrigger<T>>(value);
 }
 
 template<typename T>
 inline Event Set(T& value, T newValue) {
 	return [&value, newValue]() {value = newValue; };
+}
+
+template<typename T>
+inline Event Toggle(T& value) {
+	return [&value]() {value = !value;};
 }
 
 template<typename...Args>
@@ -72,7 +124,7 @@ inline Event Do(Args&&... args) {
 
 template<typename...Args>
 inline Event Print(Args&&... args) {
-	return [args...]() {(std::cout << ... << args) << std::endl;};
+	return [&args...]() {(std::cout << ... << args) << std::endl; };
 }
 
 namespace ET {
@@ -85,7 +137,7 @@ namespace ET {
 		return [triggerer](T value) {return value < triggerer; };
 	}
 	template<typename T>
-	std::function<bool(int)> EqualTo(T triggerer) {
+	std::function<bool(T)> EqualTo(T triggerer) {
 		return [triggerer](T value) {return value == triggerer; };
 	}
 	template<typename T>
@@ -160,6 +212,7 @@ class EventHandler {
 	int jobVersion = 0;
 	std::queue<Event> eventsJob;
 	std::mutex jobsMutex;
+	std::unordered_map<std::string, EventState> eventStates;
 public:
 	std::atomic<bool> isEventsRunning = true;
 
@@ -176,13 +229,19 @@ public:
 					switch (event.second.type)
 					{
 					case ET_Trigger:
-						if ((*event.second.trigger).IsTriggered()) {
+					{
+						bool triggered = event.second.trigger->IsTriggered();
+
+						if (triggered && !event.second.wasTriggered) {
 							{
 								std::lock_guard lock(jobsMutex);
 								eventsJob.push(event.second.callback);
 							}
 						}
-						break;
+
+						event.second.wasTriggered = triggered;
+					}
+					break;
 					case ET_OneTime:
 						if ((*event.second.trigger).IsTriggered()) {
 							{
@@ -194,8 +253,21 @@ public:
 						break;
 
 					case ET_Continuous:
-
-						break;
+					{
+						if (event.second.trigger->IsTriggered()) {
+							std::lock_guard lock(jobsMutex);
+							eventsJob.push(event.second.callback);
+						}
+					}
+					break;
+					case ET_OnChange:
+					{
+						if (event.second.trigger->IsTriggered()) {
+							std::lock_guard lock(jobsMutex);
+							eventsJob.push(event.second.callback);
+						}
+					}
+					break;
 					default:
 						break;
 					}
@@ -215,6 +287,9 @@ public:
 	}
 	void On(std::string eventName, std::shared_ptr<Trigger> trigger, Event event) {
 		eventsSnapshot.Insert(eventName, EventData{ eventName, ET_Trigger, trigger, event });
+	}
+	void OnChange(std::string eventName, std::shared_ptr<Trigger> trigger, Event event) {
+		eventsSnapshot.Insert(eventName, EventData{ eventName, ET_OnChange, trigger, event });
 	}
 	void While(std::string eventName, std::shared_ptr<Trigger> trigger, Event event) {
 		eventsSnapshot.Insert(eventName, EventData{ eventName, ET_Continuous, trigger, event });
