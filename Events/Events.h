@@ -131,7 +131,7 @@ struct EventData {
 	Event elseCallback = nullptr;
 	float time = 0;
 	float timer = 0;
-
+	bool executeImmediately = false;
 };
 
 template<typename T>
@@ -146,7 +146,7 @@ inline auto When(std::atomic<bool>& trigger) {
 }
 
 template<typename F>
-requires std::invocable<F>
+	requires std::invocable<F>
 inline auto When(F&& trigger) {
 	return std::make_shared<BoolFunctionTrigger<F>>(std::forward<F>(trigger));
 }
@@ -274,10 +274,10 @@ class EventBuilder {
 public:
 	EventBuilder(EventHandler& handler, std::string eventName) : handler(handler), eventName(eventName) {}
 
-	EventBuilder& ThenOnce(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent = nullptr, float timer = 0);
-	EventBuilder& ThenOn(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent = nullptr, float timer = 0);
-	EventBuilder& ThenOnChange(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent = nullptr, float timer = 0);
-	EventBuilder& ThenWhile(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent = nullptr, float timer = 0);
+	EventBuilder& ThenOnce(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent = nullptr, float timer = 0, bool executeImmediately = false);
+	EventBuilder& ThenOn(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent = nullptr, float timer = 0, bool executeImmediately = false);
+	EventBuilder& ThenOnChange(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent = nullptr, float timer = 0, bool executeImmediately = false);
+	EventBuilder& ThenWhile(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent = nullptr, float timer = 0, bool executeImmediately = false);
 };
 
 class EventHandler {
@@ -327,16 +327,19 @@ public:
 				for (auto& event : events) {
 					auto& state = eventStates[event.first];
 
-					if (Tick - state.timer < 0)
+					if (Tick - state.timer < 0 && !(event.second.executeImmediately && !state.initialized))
 						continue;
 
 					if (!state.active)
 						continue;
 
-					if (state.time > 0) {
+					if (state.time > 0 && state.initialized)
 						state.timer += state.time;
-					}
-					
+
+					if (!state.initialized)
+						state.initialized = true;
+
+
 
 					switch (event.second.type)
 					{
@@ -345,12 +348,12 @@ public:
 						bool triggered = event.second.trigger->IsTriggered();
 
 						if (triggered && !state.wasTriggered) {
-							if (state.nextEvent != "" && !eventStates[state.nextEvent].active){
+							if (state.nextEvent != "" && !eventStates[state.nextEvent].active) {
 								auto& nextState = eventStates[state.nextEvent];
 								nextState.active = true;
 								nextState.timer = Tick + nextState.time;
 							}
-							
+
 							{
 								std::lock_guard lock(jobsMutex);
 								eventsJob.push(event.second.callback);
@@ -385,6 +388,7 @@ public:
 								eventsJob.push(event.second.callback);
 							}
 							eventsSnapshot.Erase(event.first);
+							eventStates.erase(event.first);
 						}
 						break;
 
@@ -430,37 +434,45 @@ public:
 		isEventsRunning = false;
 		eventsThread.join();
 	}
-	EventBuilder Once(std::string eventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent = nullptr, float timer = 0) {
+	EventBuilder Once(std::string eventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent = nullptr, float timer = 0, bool executeImmediately = false) {
 		if (!batchBegined)
-			eventsSnapshot.Insert(eventName, EventData{ eventName, ET_OneTime, trigger, event, elseEvent, timer, timer });
+			eventsSnapshot.Insert(eventName, EventData{ eventName, ET_OneTime, trigger, event, elseEvent, timer, timer, executeImmediately });
 		else
-			batch.insert_or_assign(eventName, EventData{ eventName, ET_OneTime, trigger, event, elseEvent, timer, timer });
-	
-		return EventBuilder(*this, eventName);
-	}
-	EventBuilder On(std::string eventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent = nullptr, float timer = 0) {
-		if (!batchBegined)
-			eventsSnapshot.Insert(eventName, EventData{ eventName, ET_Trigger, trigger, event, elseEvent, timer, timer });
-		else
-			batch.insert_or_assign(eventName, EventData{ eventName, ET_Trigger, trigger, event, elseEvent, timer, timer });
+			batch.insert_or_assign(eventName, EventData{ eventName, ET_OneTime, trigger, event, elseEvent, timer, timer, executeImmediately });
 
 		return EventBuilder(*this, eventName);
 	}
-	EventBuilder OnChange(std::string eventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent = nullptr, float timer = 0) {
+	EventBuilder On(std::string eventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent = nullptr, float timer = 0, bool executeImmediately = false) {
 		if (!batchBegined)
-			eventsSnapshot.Insert(eventName, EventData{ eventName, ET_OnChange, trigger, event, elseEvent, timer, timer });
+			eventsSnapshot.Insert(eventName, EventData{ eventName, ET_Trigger, trigger, event, elseEvent, timer, timer, executeImmediately });
 		else
-			batch.insert_or_assign(eventName, EventData{ eventName, ET_OnChange, trigger, event, elseEvent, timer, timer });
-	
+			batch.insert_or_assign(eventName, EventData{ eventName, ET_Trigger, trigger, event, elseEvent, timer, timer, executeImmediately });
+
 		return EventBuilder(*this, eventName);
 	}
-	EventBuilder While(std::string eventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent = nullptr, float timer = 0) {
+	EventBuilder OnChange(std::string eventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent = nullptr, float timer = 0, bool executeImmediately = false) {
 		if (!batchBegined)
-			eventsSnapshot.Insert(eventName, EventData{ eventName, ET_Continuous, trigger, event, elseEvent, timer, timer });
+			eventsSnapshot.Insert(eventName, EventData{ eventName, ET_OnChange, trigger, event, elseEvent, timer, timer, executeImmediately });
 		else
-			batch.insert_or_assign(eventName, EventData{ eventName, ET_Continuous, trigger, event, elseEvent, timer, timer });
-		
+			batch.insert_or_assign(eventName, EventData{ eventName, ET_OnChange, trigger, event, elseEvent, timer, timer, executeImmediately });
+
 		return EventBuilder(*this, eventName);
+	}
+	EventBuilder While(std::string eventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent = nullptr, float timer = 0, bool executeImmediately = false) {
+		if (!batchBegined)
+			eventsSnapshot.Insert(eventName, EventData{ eventName, ET_Continuous, trigger, event, elseEvent, timer, timer ,executeImmediately });
+		else
+			batch.insert_or_assign(eventName, EventData{ eventName, ET_Continuous, trigger, event, elseEvent, timer, timer, executeImmediately });
+
+		return EventBuilder(*this, eventName);
+	}
+
+	void Activate() {
+
+	}
+
+	void Deactivate() {
+
 	}
 
 	void BeginBatch() {
@@ -489,49 +501,49 @@ public:
 	}
 };
 
-EventBuilder& EventBuilder::ThenOnce(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent, float timer) {
+EventBuilder& EventBuilder::ThenOnce(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent, float timer, bool executeImmediately) {
 	handler.eventStates[nextEventName].active = false;
 	handler.eventStates[eventName].nextEvent = nextEventName;
 	if (!handler.batchBegined)
-		handler.eventsSnapshot.Insert(nextEventName, EventData{ nextEventName, ET_OneTime, trigger, event, elseEvent, timer, timer });
+		handler.eventsSnapshot.Insert(nextEventName, EventData{ nextEventName, ET_OneTime, trigger, event, elseEvent, timer, timer, executeImmediately });
 	else
-		handler.batch.insert_or_assign(nextEventName, EventData{ nextEventName, ET_OneTime, trigger, event, elseEvent, timer, timer });
+		handler.batch.insert_or_assign(nextEventName, EventData{ nextEventName, ET_OneTime, trigger, event, elseEvent, timer, timer, executeImmediately });
 
 	eventName = nextEventName;
 	return *this;
 }
 
-EventBuilder& EventBuilder::ThenOn(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent , float timer ) {
+EventBuilder& EventBuilder::ThenOn(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent, float timer, bool executeImmediately) {
 	handler.eventStates[nextEventName].active = false;
 	handler.eventStates[eventName].nextEvent = nextEventName;
 	if (!handler.batchBegined)
-		handler.eventsSnapshot.Insert(nextEventName, EventData{ nextEventName, ET_Trigger, trigger, event, elseEvent, timer, timer });
+		handler.eventsSnapshot.Insert(nextEventName, EventData{ nextEventName, ET_Trigger, trigger, event, elseEvent, timer, timer, executeImmediately });
 	else
-		handler.batch.insert_or_assign(nextEventName, EventData{ nextEventName, ET_Trigger, trigger, event, elseEvent, timer, timer });
+		handler.batch.insert_or_assign(nextEventName, EventData{ nextEventName, ET_Trigger, trigger, event, elseEvent, timer, timer, executeImmediately });
 
 	eventName = nextEventName;
 	return *this;
 }
 
-EventBuilder& EventBuilder::ThenOnChange(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent , float timer ) {
+EventBuilder& EventBuilder::ThenOnChange(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent, float timer, bool executeImmediately) {
 	handler.eventStates[nextEventName].active = false;
 	handler.eventStates[eventName].nextEvent = nextEventName;
 	if (!handler.batchBegined)
-		handler.eventsSnapshot.Insert(nextEventName, EventData{ nextEventName, ET_OnChange, trigger, event, elseEvent, timer, timer });
+		handler.eventsSnapshot.Insert(nextEventName, EventData{ nextEventName, ET_OnChange, trigger, event, elseEvent, timer, timer, executeImmediately });
 	else
-		handler.batch.insert_or_assign(nextEventName, EventData{ nextEventName, ET_OnChange, trigger, event, elseEvent, timer, timer });
+		handler.batch.insert_or_assign(nextEventName, EventData{ nextEventName, ET_OnChange, trigger, event, elseEvent, timer, timer, executeImmediately });
 
 	eventName = nextEventName;
 	return *this;
 }
 
-EventBuilder& EventBuilder::ThenWhile(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent , float timer) {
+EventBuilder& EventBuilder::ThenWhile(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent, float timer, bool executeImmediately) {
 	handler.eventStates[nextEventName].active = false;
 	handler.eventStates[eventName].nextEvent = nextEventName;
 	if (!handler.batchBegined)
-		handler.eventsSnapshot.Insert(nextEventName, EventData{ nextEventName, ET_Continuous, trigger, event, elseEvent, timer, timer });
+		handler.eventsSnapshot.Insert(nextEventName, EventData{ nextEventName, ET_Continuous, trigger, event, elseEvent, timer, timer, executeImmediately });
 	else
-		handler.batch.insert_or_assign(nextEventName, EventData{ nextEventName, ET_Continuous, trigger, event, elseEvent, timer, timer });
+		handler.batch.insert_or_assign(nextEventName, EventData{ nextEventName, ET_Continuous, trigger, event, elseEvent, timer, timer, executeImmediately });
 
 	eventName = nextEventName;
 	return *this;
