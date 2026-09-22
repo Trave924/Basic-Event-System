@@ -7,8 +7,11 @@
 std::atomic<bool> isRunning = true;
 
 
-void test() {
-	std::cout << "test" << std::endl;
+bool test() {
+	return true;
+}
+bool test2(int te) {
+	return true;
 }
 
 void OldSpeed() {
@@ -94,7 +97,17 @@ void FullTest() {
 	event.On("CriticalHealth", When(playerHealth, ET::LessOrEqualThan(20)), Print("Critical Health"));
 	event.On("Dead", When(playerHealth, ET::LessOrEqualThan(0)), Print("Dead"));
 
+	event.On("Test", When(test), Print("Test"));
+	event.On("Testt", When([]() {return test2(10); }), Print("Test"));
+
 	int frames = 0;
+
+	bool timedTrigger = false;
+	event.While("timedEvent", When(true), Do(Print("timed event"), Set(timedTrigger, true)), nullptr, 3.f);
+
+	event.On("sequencedEvent1", When(timedTrigger), Print("Sequenced Event 1"))
+		.ThenOn("sequencedEvent2", When(true), Print("Sequenced Event 2"), nullptr , 5.f)
+		.ThenOn("sequencedEvent3", When(true), Print("Sequenced Event 3"), nullptr , 3.f);
 
 	OldSpeed();
 	NewSpeed();
