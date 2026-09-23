@@ -103,18 +103,26 @@ void FullTest() {
 	int frames = 0;
 
 	bool timedTrigger = false;
-	event.While("timedEvent", When(true), Do(Print("timed event"), Set(timedTrigger, true)), nullptr, 3.f);
+	event.While("timedEvent", When(true), Do(Print("timed event"), Set(timedTrigger, true)), nullptr, Timed(3.f));
 
 	event.On("sequencedEvent1", When(timedTrigger), Print("Sequenced Event 1"))
-		.ThenOn("sequencedEvent2", When(true), Print("Sequenced Event 2"), nullptr , 5.f)
-		.ThenOn("sequencedEvent3", When(true), Print("Sequenced Event 3"), nullptr , 3.f);
+		.ThenOn("sequencedEvent2", When(true), Print("Sequenced Event 2"), nullptr , Timed(5.f))
+		.ThenOn("sequencedEvent3", When(true), Print("Sequenced Event 3"), nullptr , Timed(3.f));
 
 	OldSpeed();
 	NewSpeed();
 
+	float test = 3.f;
+	float test2 = 1.3f;
+
+	event.On("test", When(true), Print("Test"), nullptr, Timed(4.f), false);
+	event.On("test2", When(true), Print("Test2"), nullptr, Timed([&]() {return test - test2; }), false);
+	event.On("test3", When(true), Print("Test3"), nullptr, Timed(test), false);
 
 	while (isRunning.load()) {
 		event.HandleJobs();
+
+		test2 += 0.01f;
 
 		if (frames == 40)
 			playerHealth = 50;
