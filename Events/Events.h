@@ -183,15 +183,67 @@ public:
 
 template<typename T>
 class ChangeTrigger : public Trigger {
-	T& value;
+	std::weak_ptr<T> value;
 	T previousValue;
 
 public:
-	ChangeTrigger(T& value) : value(value), previousValue(value) {}
+	ChangeTrigger(std::shared_ptr<T> value) : value(value), previousValue(*value) {}
 
 	bool IsTriggered() override {
-		if (value != previousValue) {
-			previousValue = value;
+		if (auto obj = value.lock()) {
+			T val = *obj;
+			if (val != previousValue) {
+				previousValue = val;
+				return true;
+			}
+			return false;
+		}
+		else {
+			// logic to destroy event later
+			std::cout << "value destroyed" << std::endl;
+			return false;
+		}
+	}
+};
+
+template<typename T>
+class ChangeAtomicTrigger : public Trigger {
+	std::weak_ptr<std::atomic<T>> value;
+	T previousValue;
+
+public:
+	ChangeAtomicTrigger(std::shared_ptr<std::atomic<T>> value) : value(value), previousValue((*value).load()) {}
+
+	bool IsTriggered() override {
+		if (auto obj = value.lock()) {
+			T val = (*obj).load();
+			if (val != previousValue) {
+				previousValue = val;
+				return true;
+			}
+			return false;
+		}
+		else {
+			// logic to destroy event later
+			std::cout << "value destroyed" << std::endl;
+			return false;
+		}
+	}
+};
+
+template<typename T>
+class FunctionChangeTrigger : public Trigger {
+	std::function<T()> value;
+	T previousValue;
+
+public:
+	FunctionChangeTrigger(std::function<T()> value) : value(std::move(value)), previousValue(this->value()) {}
+
+	bool IsTriggered() override {
+		T currentValue = value();
+
+		if (currentValue != previousValue) {
+			previousValue = currentValue;
 			return true;
 		}
 
@@ -227,7 +279,7 @@ inline auto When(EventValue<bool> trigger) {
 
 // (NOT LIFE TIME AWARE) on your risk , i couldn't reach values ref in lambda and make it api beginner friendly at the same time 
 template<typename F>
-requires std::invocable<F>
+	requires std::invocable<F>
 inline auto When(F&& trigger) {
 	return std::make_shared<BoolFunctionTrigger<F>>(std::forward<F>(trigger));
 }
@@ -236,28 +288,40 @@ template<typename T>
 inline auto When(EventValue<T> trigger, std::function<bool(TriggerValue<T>)> condition) {
 	return std::make_shared<ValueTrigger<T>>(trigger.Get(), condition);
 }
+template<typename T>
+inline auto When(EventAtomicValue<T> trigger, std::function<bool(TriggerValue<std::atomic<T>>)> condition) {
+	return std::make_shared<ValueTrigger<std::atomic<T>>>(trigger.Get(), condition);
+}
 
 inline auto When(EventAtomicValue<bool> trigger) {
 	return std::make_shared<BoolTrigger<std::atomic<bool>>>(trigger.Get());
 }
 
-//template<typename F>
-//	requires std::invocable<F>
-//inline auto When(F&& trigger) {
-//	return std::make_shared<BoolFunctionTrigger<F>>(std::forward<F>(trigger));
-//}
-//template<typename T>
-//inline auto When(std::function<T()> trigger, std::function<bool(TriggerValue<T>)> condition) {
-//	return std::make_shared<FunctionTrigger<T>>(trigger, condition);
-//}
-//template<typename T>
-//inline auto When(T&& trigger) {
-//	return std::make_shared<staticTrigger<T>>(std::move(trigger));
-//}
 
 template<typename T>
-inline auto Change(T& value) {
-	return std::make_shared<ChangeTrigger<T>>(value);
+inline auto When(std::function<T()> trigger, std::function<bool(TriggerValue<T>)> condition) {
+	return std::make_shared<FunctionTrigger<T>>(trigger, condition);
+}
+template<typename T>
+inline auto When(T&& trigger) {
+	return std::make_shared<staticTrigger<T>>(std::move(trigger));
+}
+
+template<typename T>
+inline auto Change(EventValue<T> value) {
+	return std::make_shared<ChangeTrigger<T>>(value.Get());
+}
+
+template<typename T>
+inline auto Change(EventAtomicValue<T> value) {
+	return std::make_shared<ChangeAtomicTrigger<T>>(value.Get());
+}
+
+template<typename F>
+	requires std::invocable<F&>
+inline auto Change(F&& trigger) {
+	using T = std::invoke_result_t<F&>;
+	return std::make_shared<FunctionChangeTrigger<T>>(std::function<T()>(std::forward<F>(trigger)));
 }
 
 template<typename T>
@@ -663,7 +727,7 @@ public:
 	}
 };
 
-EventBuilder& EventBuilder::ThenOnce(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent, std::function<float()> timer, bool executeImmediately) {
+inline EventBuilder& EventBuilder::ThenOnce(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent, std::function<float()> timer, bool executeImmediately) {
 	handler.eventStates[nextEventName].active = false;
 	handler.eventStates[eventName].nextEvent = nextEventName;
 	if (!handler.batchBegined)
@@ -675,7 +739,7 @@ EventBuilder& EventBuilder::ThenOnce(std::string nextEventName, std::shared_ptr<
 	return *this;
 }
 
-EventBuilder& EventBuilder::ThenOn(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent, std::function<float()> timer, bool executeImmediately) {
+inline EventBuilder& EventBuilder::ThenOn(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent, std::function<float()> timer, bool executeImmediately) {
 	handler.eventStates[nextEventName].active = false;
 	handler.eventStates[eventName].nextEvent = nextEventName;
 	if (!handler.batchBegined)
@@ -687,7 +751,7 @@ EventBuilder& EventBuilder::ThenOn(std::string nextEventName, std::shared_ptr<Tr
 	return *this;
 }
 
-EventBuilder& EventBuilder::ThenOnChange(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent, std::function<float()> timer, bool executeImmediately) {
+inline EventBuilder& EventBuilder::ThenOnChange(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent, std::function<float()> timer, bool executeImmediately) {
 	handler.eventStates[nextEventName].active = false;
 	handler.eventStates[eventName].nextEvent = nextEventName;
 	if (!handler.batchBegined)
@@ -699,7 +763,7 @@ EventBuilder& EventBuilder::ThenOnChange(std::string nextEventName, std::shared_
 	return *this;
 }
 
-EventBuilder& EventBuilder::ThenWhile(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent, std::function<float()> timer, bool executeImmediately) {
+inline EventBuilder& EventBuilder::ThenWhile(std::string nextEventName, std::shared_ptr<Trigger> trigger, Event event, Event elseEvent, std::function<float()> timer, bool executeImmediately) {
 	handler.eventStates[nextEventName].active = false;
 	handler.eventStates[eventName].nextEvent = nextEventName;
 	if (!handler.batchBegined)
